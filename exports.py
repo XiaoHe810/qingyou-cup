@@ -174,7 +174,7 @@ def bracket_diagram(state, project, width):
     columns = (0, width * .31, width * .61)
     sizes = (width * .26, width * .25, width * .38)
     redraw = bracket["quarter"]["redraw"]
-    last_title = "八强重抽结果" if redraw else "八强晋级路线"
+    last_title = ("八强重抽结果" if bracket["quarter"]["draw"] else "八强签位待重抽") if redraw else "八强晋级路线"
     for x, title in zip(columns, ("原始签位", "附加赛或轮空", last_title)):
         label(x, 398, title, 12)
     centers = [367 - i * 48 for i in range(8)]
@@ -214,7 +214,7 @@ def bracket_diagram(state, project, width):
             label(end + 9, cy - 3, "胜者进入四强循环赛")
         label(end + 9, cy - 19, " / ".join(s[:-1] for s in m["next"]), font="TNR")
     if redraw:
-        label(columns[2], 21, "5 支轮空队伍 + 3 场附加赛胜者，共 8 支队伍重新抽签")
+        label(columns[2], 8, "5 支轮空队伍 + 3 场附加赛胜者，共 8 支队伍重新抽签")
     return chart
 
 
