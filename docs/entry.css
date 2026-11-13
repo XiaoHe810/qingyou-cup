@@ -1,0 +1,12 @@
+:root{color-scheme:dark;font-family:"Inter","Microsoft YaHei",system-ui,sans-serif;color:#fff;background:#0d2141}
+*{box-sizing:border-box}
+body{min-height:100vh;margin:0;display:grid;place-items:center;background:linear-gradient(145deg,#0d2141 18%,#173a62 75%,#542e4b)}
+main{width:min(100% - 36px,650px);padding:clamp(22px,6vw,48px);border:1px solid #ffffff36;border-top:4px solid #ae3147;border-radius:18px;background:#102644;box-shadow:0 20px 48px #09152855}
+.school{color:#edba62;font-weight:750;letter-spacing:.1em;margin:0 0 14px}
+h1{font-size:clamp(1.7rem,6vw,2.75rem);line-height:1.24;margin:0 0 14px}
+.date,.tip{line-height:1.6;color:#d5e1f3}
+.links{display:grid;gap:10px;margin:25px 0 16px}
+.links a{border:1px solid #ffffff50;border-radius:9px;padding:13px 16px;color:white;text-decoration:none;text-align:center;font-weight:700}
+.links a:hover,.links a:focus-visible{outline:2px solid #edba62;outline-offset:2px}
+.links a.primary{background:#edba62;color:#0d2141;border-color:#edba62}
+.tip{margin:0;font-size:.85rem}
