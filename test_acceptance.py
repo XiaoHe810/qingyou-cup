@@ -172,10 +172,17 @@ def verify(workbook, db_path, restored_path, output=None):
     print("PASS 一院一签、并发防重、三项目相同相对顺序、混双跳过未报名、预演及两次归档重置重开", flush=True)
 
     admin.post(url + "/admin/officials", {"names": ["测试裁判甲", "测试裁判乙", "测试裁判丙", "测试裁判丁"]})
+    fixed = dict(admin.get(url + "/admin")["settings"], courts=8, project_courts={"M": 3, "W": 3, "X": 2})
+    admin.post(url + "/admin/settings", dict(fixed, project_courts={"M": 3, "W": 3, "X": 1}), 409)
+    admin.post(url + "/admin/settings", fixed)
     admin.post(url + "/admin/schedule", {"action": "build"})
     astate = admin.get(url + "/admin")
     assert len(astate["draft"]) == 37 and len({x["start"][:10] for x in astate["draft"]}) == 2
     assert not any(m["schedule"] for m in viewer.get(url)["matches"])
+    ranges = {"M": range(1, 4), "W": range(4, 7), "X": range(7, 9)}
+    assert all(x["court"] in ranges[x["code"][0]] for x in astate["draft"])
+    admin.post(url + "/admin/schedule", {"action": "edit", "items": [dict(astate["draft"][0], court=8)]}, 409)
+    assert b"%PDF" in admin.export(url + "/admin/schedule/pdf")[:8]
     with t.transaction(db_path) as db:
         ctx = sched.match_context(db, room)
         sched.check(astate["draft"], ctx, astate["settings"]["rest"])
@@ -199,10 +206,13 @@ def verify(workbook, db_path, restored_path, output=None):
                                               if o["id"] == first["schedule"]["referee"])})
     viewer.post(url + "/match", {"code": first["code"], "action": "start"}, 403)
     ref.post(url + "/match", {"code": first["code"], "action": "start"})
-    later = next(m for m in scheduled[1:] if m["a"] and m["b"] and
-                 m["schedule"]["court"] == first["schedule"]["court"])
+    with t.transaction(db_path) as db:
+        ctx = sched.match_context(db, room)
+    later = next(m for m in scheduled[1:] if m["a"] and m["b"] and (
+        m["schedule"]["referee"] == first["schedule"]["referee"] or
+        ctx[m["code"]]["players"] & ctx[first["code"]]["players"]))
     blocked = admin.post(url + "/match", {"code": later["code"], "action": "start"}, 409)
-    assert first["code"] in blocked["error"]
+    assert first["code"] in blocked["error"] or "前置比赛" in blocked["error"]
     ref.post(url + "/match", {"code": first["code"], "action": "submit", "forfeit": "b"})
     assert next(m for m in viewer.get(url)["matches"] if m["code"] == first["code"])["status"] == "playing"
     admin.post(url + "/match", {"code": first["code"], "action": "confirm"})

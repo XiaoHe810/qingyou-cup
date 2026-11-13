@@ -380,6 +380,14 @@ def create_app(db_path, secret, secure=False):
                                                "after": sched.assignments(g.db, room, "draft")})
         return jsonify(ok=True)
 
+    @app.get("/api/r/<room>/admin/schedule/pdf")
+    @api(admin=True)
+    def draft_pdf(room):
+        from exports import make_export
+        state = schedule_draft_state(g.db, room)
+        data, filename, media = make_export(state, "schedule", "pdf")
+        return send_file(data, mimetype=media, as_attachment=True, download_name="待确认_" + filename)
+
     @app.post("/api/r/<room>/match")
     @api(write=True)
     def match(room):
@@ -492,6 +500,19 @@ def public_state(db, room):
     return {"room": room, "title": r["title"], "dates": dates, "venue": r["settings"]["public_venue"] or t.DEFAULTS["venue"],
             "version": last, "teams": teams, "projects": projects, "matches": matches,
             "college_draw": t.unified_draw(db, room)}
+
+
+def schedule_draft_state(db, room):
+    state = public_state(db, room)
+    settings = t.get_room(db, room)["settings"]
+    state["title"] += " · 待确认"
+    state["venue"] = settings["venue"]
+    draft = {item["code"]: item for item in sched.assignments(db, room, "draft")}
+    officials = {item["id"]: item["name"] for item in t.rows(db, "SELECT id,name FROM officials WHERE room=?", (room,))}
+    for match in state["matches"]:
+        item = draft.get(match["code"])
+        match["schedule"] = {**item, "official": officials.get(item["referee"])} if item else None
+    return state
 
 
 def make_backup(source, target):

@@ -18,6 +18,13 @@ def config(payload, old):
     for field, low, high, label in (("courts", 1, 64, "球台"), ("minutes", 1, 720, "预计用时"),
                                     ("rest", 0, 180, "休息时间")):
         settings[field] = integer(payload[field], low, high, label)
+    allocations = payload.get("project_courts", old.get("project_courts", {}))
+    need(isinstance(allocations, dict), "分项目球台设置无效")
+    if allocations:
+        need(set(allocations) == set(PROJECTS), "请给三个项目分别设置球台数量")
+        allocations = {p: integer(allocations[p], 1, settings["courts"], "项目球台数量") for p in PROJECTS}
+        need(sum(allocations.values()) == settings["courts"], "三个项目球台数量之和须等于总球台数")
+    settings["project_courts"] = allocations
     sessions = payload["sessions"]
     need(isinstance(sessions, list) and 1 <= len(sessions) <= 30, "需要1–30个场次")
     windows = session_windows(sessions)
@@ -55,15 +62,22 @@ def match_context(db, room):
                          ORDER BY CASE stage WHEN 'pre' THEN 0 WHEN 'quarter' THEN 1 ELSE 2 END,code""", (room,))
     team_players = {t["id"]: {p["person"] for p in loads(t["players"])}
                     for t in rows(db, "SELECT id,players FROM teams WHERE room=?", (room,))}
+    project_players = {p: set() for p in PROJECTS}
+    duplicate_players = set()
+    for team in rows(db, "SELECT id,project FROM teams WHERE room=?", (room,)):
+        p, players = team["project"], team_players[team["id"]]
+        if project_players[p] & players:
+            duplicate_players.add(p)
+        project_players[p].update(players)
     quarter_pools = {p: quarter_info(db, room, p) for p in ("M", "W")}
     options = {}
     for m in matches:
         deps = {x for x in (m["a_source"], m["b_source"]) if not x.startswith(("T", "Q"))}
         if m["stage"] == "round":
             deps.update(x["code"] for x in matches if x["stage"] == "quarter" and x["project"] == m["project"])
+        if m["stage"] == "quarter":
+            deps.update(x["code"] for x in matches if x["stage"] == "pre" and x["project"] == m["project"])
         pool = quarter_pools.get(m["project"])
-        if m["a_source"].startswith("Q"):
-            deps = {x["code"] for x in pool["preliminary"]}
         teams = set()
         for side in ("a", "b"):
             source = m[side + "_source"]
@@ -77,7 +91,7 @@ def match_context(db, room):
             else:
                 teams.update(options[source]["teams"])
         options[m["code"]] = {**m, "teams": teams, "players": set().union(*(team_players[t] for t in teams)),
-                              "deps": deps}
+                              "deps": deps, "unique_project_players": m["project"] not in duplicate_players}
     return options
 
 
@@ -86,11 +100,24 @@ def assignments(db, room, kind):
                 (room, kind))
 
 
+def courts_for(project, settings):
+    allocations = settings.get("project_courts")
+    if not allocations:
+        return range(1, settings["courts"] + 1)
+    start = 1
+    for p in PROJECTS:
+        end = start + allocations[p]
+        if p == project:
+            return range(start, end)
+        start = end
+    raise ValueError("比赛项目无效")
+
+
 def normalized(item, settings, officials):
     start = local_time(item["start"])
     end = start + timedelta(minutes=settings["minutes"])
     court, referee = item["court"], item.get("referee") or None
-    need(type(court) is int and 1 <= court <= settings["courts"], "球台编号超出设置范围")
+    need(type(court) is int and court in courts_for(item["code"][0], settings), "球台不在该项目的分配范围内")
     need(referee is None or referee in officials, "裁判不在裁判名单内")
     need(any(a <= start and end <= b for a, b in session_windows(settings["sessions"])), "时间超出比赛场次")
     return {"code": item["code"], "start": start.isoformat(timespec="minutes"),
@@ -109,6 +136,12 @@ def conflict(a, b, options, rest):
             return "裁判冲突"
     gap = timedelta(minutes=rest)
     if start_a < end_b + gap and start_b < end_a + gap:
+        # Quarterfinal slots are unique. Round-robin games with disjoint
+        # quarterfinal sources also cannot share a team.
+        if am["project"] == bm["project"] and am["stage"] == bm["stage"] and am["unique_project_players"]:
+            if am["stage"] == "quarter" or am["stage"] == "round" and {
+                    am["a_source"], am["b_source"]}.isdisjoint({bm["a_source"], bm["b_source"]}):
+                return None
         if am["teams"] & bm["teams"]:
             return "同队比赛或休息时间冲突"
         if am["players"] & bm["players"]:
@@ -148,7 +181,7 @@ def build_schedule(db, room, settings):
         for first, last in preferred:
             at = first
             while not chosen and at + duration <= last:
-                for court in range(1, settings["courts"] + 1):
+                for court in courts_for(m["project"], settings):
                     for referee in officials or [None]:
                         x = {"code": k, "start": at.isoformat(timespec="minutes"),
                              "end": (at + duration).isoformat(timespec="minutes"),

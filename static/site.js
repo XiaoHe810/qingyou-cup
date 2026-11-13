@@ -261,6 +261,9 @@ function settingsForm() {
   const s=admin.settings;
   return '<form id="settings"><div class="form-row">'+field("比赛地点","venue",s.venue,"text","required")+field("球台数量","courts",s.courts,"number","min=1 max=64 required")+
     field("每场预计用时（分钟）","minutes",s.minutes,"number","min=1 required")+field("选手休息（分钟）","rest",s.rest,"number","min=0 required")+'</div>'+
+    '<div class="form-row">'+Object.entries(projects).map(([p,name])=>
+      field(name+"球台数","courts_"+p,s.project_courts?.[p]||"","number","min=1 max=64")).join("")+'</div>'+
+    '<p class="small muted">三个项目均留空时共用球台。填写后，球台按男子、女子、混双顺序连续编号。</p>'+
     '<label>场次（每行 日期 开始 结束）<textarea name="sessions" required>'+s.sessions.map(x=>escape([x.date,x.start,x.end].join(" "))).join("\n")+'</textarea></label>'+
     '<label class="actions"><input style="width:auto;min-height:0" type="checkbox" name="final_day" '+(s.final_day?"checked":"")+'>四强循环赛优先安排在最后一个比赛日</label>'+
     '<div class="form-row">'+field("胜场积分","win",s.points.win,"number","min=0 required")+field("负场积分","loss",s.points.loss,"number","min=0 required")+
@@ -277,7 +280,9 @@ function planning() {
   const officials={"":"未安排",...Object.fromEntries(admin.officials.map(o=>[o.id,o.name]))};
   const byCode=Object.fromEntries(state.matches.map(m=>[m.code,m]));
   return header("比赛日程管理")+panel('<h2>编排参数</h2><p class="warnbox">初始球台、比赛时长及场次结束时间为排程默认值，请按现场条件核对。</p>'+settingsForm())+
-    panel('<div class="bar"><h2>日程草案 <span class="tag warn">待确认</span></h2><div class="actions">'+button("生成 / 重新编排","plan","build")+button("确认并发布","plan","publish","")+'</div></div>'+
+    panel('<div class="bar"><h2>日程草案 <span class="tag warn">待确认</span></h2><div class="actions">'+
+      (admin.draft.length?'<a class="button subtle" href="'+root+'/admin/schedule/pdf">下载日程草案 PDF</a>':"")+
+      button("生成 / 重新编排","plan","build")+button("确认并发布","plan","publish","")+'</div></div>'+
     (admin.draft.length?'<form id="draft"><div class="scroll"><table class="wide-table"><thead><tr><th>编号</th><th>对阵</th><th>开始</th><th>球台</th><th>裁判</th></tr></thead><tbody>'+
       admin.draft.map(x=>{const m=byCode[x.code]; const disabled=m.status==="pending"?"required":"disabled";
         return '<tr data-code="'+x.code+'"><td>'+x.code+'</td><td>'+sides(m).map(escape).join(" / ")+'</td><td><input aria-label="'+x.code+' 开始时间" name="start_'+x.code+'" type="datetime-local" value="'+escape(x.start.slice(0,16))+'" '+disabled+'></td>'+
@@ -458,6 +463,8 @@ document.addEventListener("submit", async e=>{
         row:p.row,name:d["name_"+p.row],role:d["role_"+p.row],sex:d["sex_"+p.row]||""}))});
     } else if(f.id==="settings"){
       await mutate(root+"/admin/settings",{venue:d.venue,courts:+d.courts,minutes:+d.minutes,rest:+d.rest,
+        project_courts:Object.keys(projects).some(p=>d["courts_"+p])?
+          Object.fromEntries(Object.keys(projects).map(p=>[p,+d["courts_"+p]])):{},
         sessions:d.sessions.trim().split(/\n+/).map(line=>{const [date,start,end]=line.trim().split(/\s+/);return {date,start,end};}),
         final_day:!!d.final_day,points:{win:+d.win,loss:+d.loss,forfeit:+d.forfeit},tie:[d.tie_0,d.tie_1,d.tie_2,d.tie_3].filter(Boolean),
         confirm_tie:!!d.confirm_tie,tie_basis:d.tie_basis,
