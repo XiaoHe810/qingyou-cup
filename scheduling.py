@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 from itertools import combinations
 
-from tournament import PROJECTS, TZ, DEFAULTS, need, rows, one, loads, dumps, log, now
+from tournament import quarter_info, PROJECTS, TZ, DEFAULTS, need, rows, one, loads, dumps, log, now
 
 TIE_RULES = {"head_to_head": "两队直接交锋", "rubber_diff": "净胜单项", "game_diff": "净胜局", "point_diff": "净胜分"}
 
@@ -55,14 +55,25 @@ def match_context(db, room):
                          ORDER BY CASE stage WHEN 'pre' THEN 0 WHEN 'quarter' THEN 1 ELSE 2 END,code""", (room,))
     team_players = {t["id"]: {p["person"] for p in loads(t["players"])}
                     for t in rows(db, "SELECT id,players FROM teams WHERE room=?", (room,))}
+    quarter_pools = {p: quarter_info(db, room, p) for p in ("M", "W")}
     options = {}
     for m in matches:
-        deps = {x for x in (m["a_source"], m["b_source"]) if not x.startswith("T")}
+        deps = {x for x in (m["a_source"], m["b_source"]) if not x.startswith(("T", "Q"))}
+        if m["stage"] == "round":
+            deps.update(x["code"] for x in matches if x["stage"] == "quarter" and x["project"] == m["project"])
+        pool = quarter_pools.get(m["project"])
+        if m["a_source"].startswith("Q"):
+            deps = {x["code"] for x in pool["preliminary"]}
         teams = set()
         for side in ("a", "b"):
             source = m[side + "_source"]
             if m[side]:
                 teams.add(m[side])
+            elif source.startswith("Q"):
+                teams.update(pool["entrants"])
+                for pre in pool["preliminary"]:
+                    if not pre["winner"]:
+                        teams.update((pre["a"], pre["b"]))
             else:
                 teams.update(options[source]["teams"])
         options[m["code"]] = {**m, "teams": teams, "players": set().union(*(team_players[t] for t in teams)),
@@ -189,6 +200,7 @@ def can_start(db, room, match, settings):
     need(match["a"] and match["b"], "双方尚未确定")
     options = match_context(db, room)
     current = options[match["code"]]
+    need(all(options[k]["status"] == "done" for k in current["deps"]), "本阶段前置比赛尚未全部结束")
     plan = {s["code"]: s for s in assignments(db, room, "public")}
     need(match["code"] in plan, "请先发布该场日程")
     for key, m in options.items():

@@ -39,6 +39,11 @@ def score_text(score, project):
     return "-".join(map(str, score["games"] if project == "X" else score["total"]))
 
 
+def match_side(m, side, names):
+    source = m[side + "_source"]
+    return names.get(m[side]) or (f"八强重抽 {source[1:]}号签" if source.startswith("Q") else source + " 胜者")
+
+
 def table_data(state, kind):
     need(kind in REPORTS, "未知导出报表")
     names = {k: v["college"] for k, v in state["teams"].items()}
@@ -63,7 +68,7 @@ def table_data(state, kind):
         for m in matches:
             if kind in PROJECTS and m["project"] != kind:
                 continue
-            sides = [names.get(m[s]) or (m[s + "_source"] + " 胜者") for s in ("a", "b")]
+            sides = [match_side(m, side, names) for side in ("a", "b")]
             score = score_text(m["score"], m["project"])
             if kind == "scores" and m["score"] and not m["score"]["forfeit"]:
                 details = ["、".join(f"{a}-{b}" for a, b in rub) for rub in m["score"]["rubbers"]]
@@ -77,7 +82,7 @@ def table_data(state, kind):
             s = m["schedule"]
             if not s:
                 continue
-            sides = [names.get(m[side]) or (m[side + "_source"] + " 胜者") for side in ("a", "b")]
+            sides = [match_side(m, side, names) for side in ("a", "b")]
             lines.append([display_time(s["start"]), s["end"][11:16], s["court"], m["code"],
                           sides[0] + " / " + sides[1], s["official"] or ""])
         lines.sort(key=lambda item: (item[5], item[0], item[2]) if kind == "referees" else (item[0], item[2]))
@@ -168,7 +173,9 @@ def bracket_diagram(state, project, width):
 
     columns = (0, width * .31, width * .61)
     sizes = (width * .26, width * .25, width * .38)
-    for x, title in zip(columns, ("原始签位", "附加赛或轮空", "八强晋级路线")):
+    redraw = bracket["quarter"]["redraw"]
+    last_title = "八强重抽结果" if redraw else "八强晋级路线"
+    for x, title in zip(columns, ("原始签位", "附加赛或轮空", last_title)):
         label(x, 398, title, 12)
     centers = [367 - i * 48 for i in range(8)]
     for pair, cy in enumerate(centers):
@@ -192,15 +199,22 @@ def bracket_diagram(state, project, width):
         cy = (top + bottom) / 2
         start, end = columns[1] + sizes[1], columns[2]
         middle = (start + end) / 2
-        line(start, top, middle, top)
-        line(start, bottom, middle, bottom)
-        line(middle, top, middle, bottom)
-        line(middle, cy, end, cy)
+        if not redraw:
+            line(start, top, middle, top)
+            line(start, bottom, middle, bottom)
+            line(middle, top, middle, bottom)
+            line(middle, cy, end, cy)
         box(end, cy - 28, sizes[2], 56)
         label(end + 9, cy + 13, m["code"], font="TNR")
-        label(end + 43, cy + 13, names.get(m["winner"], "胜者待定"))
-        label(end + 9, cy - 3, "胜者进入四强循环赛")
+        if redraw:
+            label(end + 43, cy + 13, match_side(m, "a", names))
+            label(end + 43, cy - 3, match_side(m, "b", names))
+        else:
+            label(end + 43, cy + 13, names.get(m["winner"], "胜者待定"))
+            label(end + 9, cy - 3, "胜者进入四强循环赛")
         label(end + 9, cy - 19, " / ".join(s[:-1] for s in m["next"]), font="TNR")
+    if redraw:
+        label(columns[2], 21, "5 支轮空队伍 + 3 场附加赛胜者，共 8 支队伍重新抽签")
     return chart
 
 

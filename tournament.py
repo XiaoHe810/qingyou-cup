@@ -169,6 +169,7 @@ def reset_draw(db, room, actor, reason, confirm):
         {"reason": reason.strip(), "preview": bool(settings.get("college_preview")),
          "projects": [{**p, "draws": get_draws(db, p)} for p in projects],
          "college_draws": college_draws(db, room, projects[0]["revision"]),
+         "quarter_draws": rows(db, "SELECT * FROM quarter_draws WHERE room=? AND revision=?", (room, projects[0]["revision"])),
          "matches": rows(db, "SELECT * FROM matches WHERE room=?", (room,)),
          "schedule": rows(db, "SELECT * FROM schedule WHERE room=?", (room,)),
          "participants": rows(db, "SELECT * FROM participants WHERE room=?", (room,))})
@@ -277,6 +278,8 @@ def create_matches(db, room, project, draws, byes):
         a, b = slots.get(first), slots.get(first + 1)
         need(a or b, "同一个首轮对位不能有两个空签")
         quarter_inputs.append(add("pre", a, b) if a and b else a or b)
+    if project in ("M", "W"):
+        quarter_inputs = [f"Q{i}" for i in range(1, 9)]
     quarters = [add("quarter", quarter_inputs[i], quarter_inputs[i + 1]) for i in range(0, 8, 2)]
     # Three rounds of two disjoint pairings for a four-team round robin.
     for a, b in ((0, 3), (1, 2), (0, 2), (3, 1), (0, 1), (2, 3)):
@@ -285,15 +288,61 @@ def create_matches(db, room, project, draws, byes):
     refresh_matches(db, room, project)
 
 
+def quarter_info(db, room, project):
+    p = project_state(db, room, project)
+    matches = rows(db, "SELECT * FROM matches WHERE room=? AND project=? AND stage IN ('pre','quarter') ORDER BY code",
+                   (room, project))
+    preliminary = [m for m in matches if m["stage"] == "pre"]
+    redraw = any(m["a_source"].startswith("Q") for m in matches if m["stage"] == "quarter")
+    slots = {d["slot"]: d["team"] for d in get_draws(db, p)}
+    byes = [slots[slot + 1 if slot % 2 else slot - 1] for slot in p["byes"] if (slot + 1 if slot % 2 else slot - 1) in slots]
+    entrants = byes + [m["winner"] for m in preliminary if m["winner"]]
+    draw = rows(db, """SELECT slot,team,drawn_at FROM quarter_draws WHERE room=? AND project=? AND revision=? ORDER BY slot""",
+                (room, project, p["revision"]))
+    return {"redraw": redraw, "byes": byes, "entrants": entrants, "draw": draw,
+            "ready": redraw and len(entrants) == 8 and not draw,
+            "preliminary": preliminary}
+
+
+def draw_quarters(db, room, project, actor):
+    info = quarter_info(db, room, project)
+    need(info["ready"], "请先确认全部附加赛成绩，八强只能抽签一次")
+    order = RNG.sample(info["entrants"], 8)
+    revision = project_state(db, room, project)["revision"]
+    stamp = now()
+    db.executemany("INSERT INTO quarter_draws VALUES(?,?,?,?,?,?)",
+                   [(room, project, revision, slot, team, stamp) for slot, team in enumerate(order, 1)])
+    refresh_matches(db, room, project)
+    log(db, room, actor, "八强重新抽签", {"project": project, "revision": revision, "slots": order})
+
+
+def simulate_preliminary(db, room, actor):
+    settings = get_room(db, room)["settings"]
+    need(settings.get("college_preview"), "仅可在预演房间模拟附加赛")
+    preliminary = rows(db, "SELECT * FROM matches WHERE room=? AND stage='pre' ORDER BY code", (room,))
+    need(preliminary and all(m["status"] == "pending" for m in preliminary), "请使用尚未录入赛况的预演附加赛")
+    for m in preliminary:
+        fmt = settings["formats"][m["project"]]
+        game = RNG.choice(([11, 7], [7, 11]))
+        scores = [[game] * (fmt["games"] // 2 + 1)] * (fmt["rubbers"] // 2 + 1)
+        score = score_payload({"rubbers": scores}, m, fmt)
+        stamp = now()
+        db.execute("""UPDATE matches SET winner=?,score=?,started=?,finished=?,status='done'
+                      WHERE room=? AND code=?""", (score["winner"], dumps(score), stamp, stamp, room, m["code"]))
+    for project in PROJECTS:
+        refresh_matches(db, room, project)
+    log(db, room, actor, "预演模拟附加赛", {"matches": [m["code"] for m in preliminary]})
+
+
 def refresh_matches(db, room, project):
     found = rows(db, "SELECT * FROM matches WHERE room=? AND project=? ORDER BY code", (room, project))
-    winners = {}
+    sources = {f'Q{d["slot"]}': d["team"] for d in quarter_info(db, room, project)["draw"]}
     for m in found:
-        a, b = [src if src.startswith("T") else winners.get(src) for src in (m["a_source"], m["b_source"])]
+        a, b = [src if src.startswith("T") else sources.get(src) for src in (m["a_source"], m["b_source"])]
         if (a, b) != (m["a"], m["b"]):
             need(m["status"] == "pending" and not m["pending_score"], f'{m["code"]} 已有赛况，无法更改对阵')
             db.execute("UPDATE matches SET a=?,b=? WHERE room=? AND code=?", (a, b, room, m["code"]))
-        winners[m["code"]] = m["winner"]
+        sources[m["code"]] = m["winner"]
 
 
 def score_payload(payload, match, fmt):

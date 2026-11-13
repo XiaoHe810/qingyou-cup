@@ -35,7 +35,8 @@ const table = (headers, rows, wide=false) => '<div class="scroll"><table class="
   rows.map(row=>'<tr>'+row.map(x=>'<td>'+x+'</td>').join("")+'</tr>').join("")+'</tbody></table></div>';
 const tabs = () => '<div class="tabs">'+Object.entries(projects).map(([p,name]) =>
   '<a class="'+(p===project?"active":"")+'" href="#'+route+'/'+p+(route==="live" && location.hash.endsWith("/screen")?"/screen":"")+'">'+name+'</a>').join("")+'</div>';
-const sides = m => ["a","b"].map(s => m[s] ? teamName(m[s]) : m[s+"_source"]+" 胜者");
+const sides = m => ["a","b"].map(s => m[s] ? teamName(m[s]) :
+  m[s+"_source"].startsWith("Q") ? "八强重抽 · "+m[s+"_source"].slice(1)+"号签" : m[s+"_source"]+" 胜者");
 const scoreText = m => !m.score ? "—" : m.score.forfeit ? (m.score.forfeit==="a"?"甲":"乙")+"方弃权" :
   (m.project==="X"?m.score.games:m.score.total).join(" : ");
 const copy = async text => {
@@ -144,10 +145,44 @@ function matchTable(items, scheduled=false) {
   }),true):empty(scheduled?"比赛日程待管理员确认发布":"抽签锁定后生成比赛对阵");
 }
 
+function matchupCards(items) {
+  if (!items.length) return empty("首轮抽签锁定后生成赛程");
+  return '<div class="match-grid">'+items.map(m=>{
+    const [a,b]=sides(m).map(escape), s=m.schedule;
+    return '<article class="match-card"><div class="bar"><strong>'+m.code+'</strong>'+chip(m.status)+'</div>'+
+      '<div class="versus"><span>'+a+'</span><small>对</small><span>'+b+'</span></div>'+
+      (m.winner?'<p>胜方 '+escape(teamName(m.winner))+' · '+escape(scoreText(m))+'</p>':"")+
+      (m.next.length?'<p class="muted">晋级去向 · '+escape(m.next.join(" / "))+'</p>':"")+
+      (s?'<p class="muted">'+timeLabel(s.start)+' · '+s.court+'号台 · '+escape(s.official||"裁判待定")+'</p>':"")+'</article>';
+  }).join("")+'</div>';
+}
+
+function quarterPanel(p) {
+  const q=state.projects[p].quarter;
+  if (!q.redraw) return "";
+  const pending=q.draw.length===0;
+  return panel('<div class="bar"><h2>八强重新抽签</h2><span class="tag">'+
+    (pending?(q.ready?"八强齐备 · 待抽签":"已确定 "+q.entrants.length+" / 8"):"已锁定")+'</span></div>'+
+    (pending?'<p>5 支轮空队伍和 3 场附加赛胜者一起重抽。1 对 2、3 对 4、5 对 6、7 对 8。</p>'+
+      '<ul class="list">'+q.entrants.map(id=>'<li><span>'+escape(teamName(id))+'</span><strong>'+
+      (q.byes.includes(id)?"轮空晋级":"附加赛胜出")+'</strong></li>').join("")+'</ul>':
+      table(["八强签位","学院","比赛"],q.draw.map(d=>[d.slot,escape(teamName(d.team)),p+String(4+Math.floor((d.slot-1)/2)).padStart(2,"0")])))+
+    (me.admin&&q.ready?button("抽取八强对阵","quarter-draw",p,""):""));
+}
+
 function matches() {
+  const x=project==="X", q=state.projects[project].quarter;
+  const forStage=stage=>matchupCards(state.matches.filter(m=>m.project===project && m.stage===stage));
+  const route=state.projects[project].state==="locked"?
+    '<p class="muted">'+(x?"1 场附加赛 · 7 对轮空 · 八强沿签位晋级":q.redraw?"3 场附加赛 · 5 支轮空 · 八强重新抽签":"3 场附加赛 · 5 支轮空 · 历史签位")+'</p>':"";
   return header("完整比赛对阵",'<div class="actions"><a class="button subtle" href="'+root+'/export/matchups/xlsx">全部对阵 Excel</a>'+
-    '<a class="button subtle" href="'+root+'/export/matchups/pdf">全部对阵 PDF</a></div>')+tabs()+Object.entries(stages).map(([stage,label])=>panel('<h2>'+label+'</h2>'+
-    matchTable(state.matches.filter(m=>m.project===project && m.stage===stage)))).join("");
+    '<a class="button subtle" href="'+root+'/export/matchups/pdf">全部对阵 PDF</a></div>')+tabs()+route+
+    panel('<h2>第一阶段 · '+(x?'9':'11')+' 进 8</h2>'+
+      (q.byes.length?'<p><strong>直接晋级 '+q.byes.length+' '+(x?'对':'支')+'</strong> · '+escape(q.byes.map(teamName).join("、"))+'</p>':"")+forStage("pre"))+
+    panel('<h2>第二阶段 · 8 进 4</h2>'+
+      (q.redraw&&!q.draw.length?'<p class="warnbox">八强抽签后公布实际对阵。下方为 4 场比赛的预留编号。</p>':"")+
+      quarterPanel(project)+forStage("quarter"))+
+    panel('<h2>第三阶段 · 四强单循环</h2><p>共 6 场，每队打 3 场，按胜负积分确定最终名次。</p>'+forStage("round"));
 }
 
 function calendar() {
@@ -190,14 +225,18 @@ function host() {
   const registered=Object.fromEntries(admin.participants.map(x=>[teamName(x.team),x.name]));
   const mode=d.ordered?"按指定顺序操作":"开放后可自由抽签";
   const actions=d.legacy?[]:d.state==="waiting"?["open","preview"]:d.state==="paused"?["open"]:d.state==="open"?["pause"]:[];
-  const labels={open:"开放 / 继续",pause:"暂停",preview:"一键预演",reset:"恢复初始状态"};
+  const labels={open:"开放 / 继续",pause:"暂停",preview:"一键预演","simulate-pre":"模拟附加赛结果",reset:"恢复初始状态"};
   return header("主持控制",chip(d.state))+
     panel('<div class="bar"><h2>'+(d.preview?"预演结果":"统一学院抽签")+'</h2><span class="tag">第 '+d.revision+' 轮 · '+d.draws.length+' / '+d.order.length+'</span></div>'+
     (d.legacy?'<p class="warnbox">此房间有旧版抽签数据，请先归档并恢复初始状态。</p>':"")+
-    '<div class="actions">'+actions.concat(d.state!=="waiting"||d.legacy?["reset"]:[])
+    '<div class="actions">'+actions.concat(
+      d.preview && state.matches.some(m=>m.stage==="pre") && state.matches.filter(m=>m.stage==="pre").every(m=>m.status==="pending")?["simulate-pre"]:[],
+      d.state!=="waiting"||d.legacy?["reset"]:[])
       .map(a=>button(labels[a],"host",a,a==="reset"?"danger":"subtle")).join("")+
     button("复制统一抽签入口","join-link")+(d.state==="locked"?'<a class="button subtle" href="#matches">查看全部对阵</a>':"")+'</div>'+
     '<p class="small muted">'+mode+' · 每个学院抽一次，全部抽齐后生成三个项目对阵</p>')+
+    (["M","W"].some(p=>state.projects[p].quarter.redraw)?
+      '<div class="split">'+["M","W"].map(p=>'<div><h3>'+projects[p]+'</h3>'+quarterPanel(p)+'</div>').join("")+'</div>':"")+
     panel('<h2>学院及联系人</h2><ol class="list" id="order">'+d.order.map(name=>'<li class="round-row" data-college="'+escape(name)+'"><span>'+
       escape(name)+(registered[name]?' <small class="muted">· '+escape(registered[name])+'</small>':"")+'</span>'+
       '<span class="actions">'+(d.state==="waiting"&&!d.legacy?button("↑","order-move","up")+button("↓","order-move","down"):"")+
@@ -363,6 +402,7 @@ document.addEventListener("click", async e=>{
       await refresh(true);
     } else if(action==="host"){
       const data={action:value};
+      if(value==="simulate-pre"&&!confirm("只在预演中生成 7 场附加赛的模拟结果？")) return;
       if(value==="preview"&&!confirm("一键生成本房间的预演对阵？可在导出后恢复初始状态。")) return;
       if(value==="reset"){
         data.reason=prompt("请输入恢复初始状态的原因");
@@ -371,6 +411,9 @@ document.addEventListener("click", async e=>{
         if(data.confirm!=="恢复初始状态") return;
       }
       await mutate(root+"/admin/draw",data);
+    } else if(action==="quarter-draw"){
+      if(!confirm("为"+projects[value]+"八强重新抽签并锁定对阵？")) return;
+      await mutate(root+"/admin/quarter-draw",{project:value,revision:state.projects[value].revision});
     } else if(action==="order-move"){
       const item=b.closest("li");
       if(value==="up"&&item.previousElementSibling) item.before(item.previousElementSibling);

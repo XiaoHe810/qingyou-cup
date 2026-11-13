@@ -128,6 +128,12 @@ def verify(workbook, db_path, restored_path, output=None):
                         if m["project"] == p and m["stage"] == "round"}) == 6
         assert [d["slot"] for d in state["projects"]["M"]["draws"]] == [d["slot"] for d in state["projects"]["W"]["draws"]]
         assert len(state["matches"]) == 37
+        for p in ("M", "W"):
+            assert state["projects"][p]["quarter"]["redraw"]
+            assert len(state["projects"][p]["quarter"]["byes"]) == 5
+            assert not state["projects"][p]["quarter"]["ready"]
+            assert all(not m["a"] and not m["b"] for m in state["matches"] if m["project"]==p and m["stage"]=="quarter")
+        assert not state["projects"]["X"]["quarter"]["redraw"]
 
     original = viewer.get(url)
     check_draw(original, 1, False)
@@ -144,6 +150,11 @@ def verify(workbook, db_path, restored_path, output=None):
     assert first.get("/api/session")["rep"] is None
     admin.post(url + "/admin/draw", {"action": "preview"})
     check_draw(viewer.get(url), 2, True)
+    admin.post(url + "/admin/draw", {"action": "simulate-pre"})
+    preview = viewer.get(url)
+    assert all(preview["projects"][p]["quarter"]["ready"] for p in ("M", "W"))
+    admin.post(url + "/admin/quarter-draw", {"project": "M", "revision": 2})
+    admin.post(url + "/admin/quarter-draw", {"project": "M", "revision": 2}, 409)
     admin.post(url + "/admin/draw", reset)
     college = order[0]
     first.post(url + "/represent", registrations[college][1])
@@ -182,6 +193,8 @@ def verify(workbook, db_path, restored_path, output=None):
     scheduled = sorted(viewer.get(url)["matches"], key=lambda m: (m["schedule"]["start"], m["code"]))
     assert len(scheduled) == 37
     first = scheduled[0]
+    admin.post(url + "/admin/quarter-draw", {"project": "M", "revision": 3}, 409)
+    admin.post(url + "/admin/quarter-draw", {"project": "X", "revision": 3}, 409)
     ref.post(url + "/referee", {"invite": next(o["invite_code"] for o in astate["officials"]
                                               if o["id"] == first["schedule"]["referee"])})
     viewer.post(url + "/match", {"code": first["code"], "action": "start"}, 403)
@@ -197,7 +210,18 @@ def verify(workbook, db_path, restored_path, output=None):
     for index, initial in enumerate(scheduled):
         if initial["code"] == first["code"]:
             continue
-        match = next(m for m in viewer.get(url)["matches"] if m["code"] == initial["code"])
+        current = viewer.get(url)
+        if initial["stage"] == "quarter" and initial["project"] in ("M", "W"):
+            p = initial["project"]
+            q = current["projects"][p]["quarter"]
+            if not q["draw"]:
+                assert q["ready"] and len(q["entrants"]) == 8
+                viewer.post(url + "/admin/quarter-draw", {"project": p, "revision": 3}, 403)
+                admin.post(url + "/admin/quarter-draw", {"project": p, "revision": 3})
+                admin.post(url + "/admin/quarter-draw", {"project": p, "revision": 3}, 409)
+                current = viewer.get(url)
+                assert {d["team"] for d in current["projects"][p]["quarter"]["draw"]} == set(q["entrants"])
+        match = next(m for m in current["matches"] if m["code"] == initial["code"])
         assert match["a"] and match["b"], match
         clock = sched.local_time("2026-11-14T08:00") + timedelta(hours=index)
         with patch("tournament.now", return_value=clock.isoformat()), patch("scheduling.now", return_value=clock.isoformat()):
@@ -250,7 +274,7 @@ def verify(workbook, db_path, restored_path, output=None):
     admin.post(url + "/match", {"code": first["code"], "action": "submit", "confirmed": True, "forfeit": "b", "reason": "验收成绩修订"})
     assert any(x["action"] == "比赛成绩或状态" and x["detail"]["reason"] == "验收成绩修订"
                and x["detail"]["before"] and x["detail"]["after"] for x in admin.get(url + "/audit"))
-    print("PASS 两天 37 场排程、实际开赛拦截、裁判确认、逐局计分、八强/四强晋级、各 6 场及同分确认", flush=True)
+    print("PASS 两天 37 场排程、实际开赛拦截、裁判确认、逐局计分、团体八强重抽及混双固定晋级、四强晋级、各 6 场及同分确认", flush=True)
 
     from exports import REPORTS
     for key in REPORTS:

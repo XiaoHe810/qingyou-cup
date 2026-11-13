@@ -241,7 +241,24 @@ def create_app(db_path, secret, secure=False):
     @api(write=True, admin=True)
     def host_draw(room):
         data = payload()
-        t.host_action(g.db, room, data["action"], g.actor, data)
+        if data["action"] == "simulate-pre":
+            t.simulate_preliminary(g.db, room, g.actor)
+        else:
+            t.host_action(g.db, room, data["action"], g.actor, data)
+        return jsonify(ok=True)
+
+    @app.post("/api/r/<room>/admin/quarter-draw")
+    @api(write=True, admin=True)
+    def quarter_draw(room):
+        data = payload()
+        project = data["project"]
+        state = t.project_state(g.db, room, project)
+        t.need(data.get("revision") == state["revision"], "抽签轮次已更新，请刷新")
+        t.draw_quarters(g.db, room, project, g.actor)
+        context = sched.match_context(g.db, room)
+        rest = t.get_room(g.db, room)["settings"]["rest"]
+        for kind in ("draft", "public"):
+            sched.check(sched.assignments(g.db, room, kind), context, rest)
         return jsonify(ok=True)
 
     @app.post("/api/r/<room>/admin/roster")
@@ -401,6 +418,9 @@ def create_app(db_path, secret, secure=False):
             else:
                 reason = data.get("reason", "").strip()
                 t.need(match["status"] != "done" or reason, "请填写成绩更正原因")
+                if match["stage"] == "pre" and match["winner"] and match["winner"] != score["winner"]:
+                    t.need(not t.quarter_info(g.db, room, match["project"])["draw"],
+                           "八强抽签已经锁定，无法更改已晋级队伍")
                 g.db.execute("""UPDATE matches SET status='done',winner=?,score=?,pending_score=NULL,finished=?
                               WHERE room=? AND code=?""",
                              (score["winner"], t.dumps(score), match["finished"] or t.now(), room, match["code"]))
@@ -452,6 +472,8 @@ def public_state(db, room):
             m["score"].pop("referee", None)
         m["next"] = [n["code"] + ("甲" if n["a_source"] == m["code"] else "乙") for n in matches
                      if m["code"] in (n["a_source"], n["b_source"])]
+        if m["stage"] == "pre" and not m["next"] and m["project"] in ("M", "W"):
+            m["next"] = ["进入八强重抽"]
         m["schedule"] = assignments.get(m["code"])
         if m["schedule"]:
             m["schedule"]["official"] = officials.get(m["schedule"]["referee"])
@@ -459,9 +481,11 @@ def public_state(db, room):
     for p in t.PROJECTS:
         item = t.project_state(db, room, p)
         draws = t.get_draws(db, item)
+        quarter = t.quarter_info(db, room, p)
+        quarter.pop("preliminary")
         standings, complete = t.standings(db, room, p, r["settings"])
         projects[p] = {"state": item["state"], "revision": item["revision"], "draws": draws, "byes": item["byes"],
-                       "order": item["draw_order"], "standings": standings, "complete": complete,
+                       "order": item["draw_order"], "quarter": quarter, "standings": standings, "complete": complete,
                        "ranking": t.rows(db, "SELECT team,rank FROM rankings WHERE room=? AND project=? ORDER BY rank", (room, p))}
     last = t.one(db, "SELECT max(id) AS n FROM audit WHERE room=?", (room,))["n"]
     dates = sorted({x["start"][:10] for x in assignments.values()}) or ["2026-11-14", "2026-11-15"]

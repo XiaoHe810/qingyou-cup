@@ -36,6 +36,13 @@ CREATE TABLE IF NOT EXISTS college_draws (
   seq INTEGER NOT NULL, drawn_at TEXT NOT NULL, actor TEXT NOT NULL,
   PRIMARY KEY(room,revision,college), UNIQUE(room,revision,position), UNIQUE(room,revision,seq)
 );
+CREATE TABLE IF NOT EXISTS quarter_draws (
+  room TEXT NOT NULL, project TEXT NOT NULL CHECK(project IN ('M','W')), revision INTEGER NOT NULL,
+  slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 8), team TEXT NOT NULL, drawn_at TEXT NOT NULL,
+  PRIMARY KEY(room,project,revision,slot), UNIQUE(room,project,revision,team),
+  FOREIGN KEY(room,project) REFERENCES projects(room,code),
+  FOREIGN KEY(room,team) REFERENCES teams(room,id)
+);
 CREATE TABLE IF NOT EXISTS matches (
   room TEXT NOT NULL, code TEXT NOT NULL, project TEXT NOT NULL, stage TEXT NOT NULL,
   a_source TEXT NOT NULL, b_source TEXT NOT NULL, a TEXT, b TEXT, winner TEXT,
