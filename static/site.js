@@ -4,7 +4,6 @@ const projects = {M:"男子团体", W:"女子团体", X:"混合双打"};
 const states = {waiting:"待开放",open:"抽签中",paused:"已暂停",locked:"已锁定",pending:"待比赛",playing:"进行中",done:"已结束"};
 const stages = {pre:"附加淘汰赛",quarter:"八强淘汰赛",round:"四强循环赛"};
 const reports = {draw:"抽签结果",M:"男子团体完整对阵",W:"女子团体完整对阵",X:"混合双打完整对阵",matchups:"三项目完整交叉对打表",schedule:"两天比赛日程",referees:"裁判工作安排",scores:"比赛成绩汇总",standings:"四强循环赛积分表",awards:"最终获奖名单"};
-const auditNames = {order:"设置顺序",open:"开放 / 继续",pause:"暂停",lock:"锁定并生成对阵",redraw:"重抽"};
 const tieRules = {head_to_head:"两队直接交锋",rubber_diff:"净胜单项",game_diff:"净胜局",point_diff:"净胜分"};
 const main = document.querySelector("#main");
 const room = location.pathname.match(/^\/r\/([a-f0-9]+)$/)?.[1];
@@ -85,19 +84,22 @@ function home() {
 }
 
 function live() {
-  const p=state.projects[project], d=p.draws.at(-1), key=d?[p.revision,d.seq,d.slot].join("-"):"";
-  const animate=key && (revealed.has(project) || drawKeys[project]!==key);
-  drawKeys[project]=key; revealed.delete(project);
-  const remaining=p.order.filter(id=>!p.draws.some(d=>d.team===id));
-  const next=p.ordered?remaining[0]:null;
-  return header("公开抽签大屏",'<div class="actions"><span class="online" id="connection">实时连接</span><a class="button subtle" href="#live/'+project+(location.hash.endsWith("/screen")?'">标准视图':'/screen">投屏视图')+'</a></div>')+
-    tabs()+'<div class="live"><p class="eyebrow">'+projects[project]+' · '+states[p.state]+'</p><div class="live-card '+(animate?"reveal":"")+'">'+
-      '<div class="ball">'+(d?String(d.slot).padStart(2,"0"):"·")+'</div><div><h2>'+(d?escape(d.college):"等待抽签")+'</h2>'+
-      '<p class="muted">'+(d?"第 "+d.seq+" 次抽签 · "+timeLabel(d.drawn_at):"签位将在负责人抽签后实时显示")+'</p></div></div></div>'+
-    '<div class="split">'+panel('<h2>抽签进度 <span class="tag">'+p.draws.length+' / '+p.order.length+'</span></h2><div class="meter"><span style="width:'+100*p.draws.length/p.order.length+'%"></span></div>'+
-      (p.draws.length?'<ul class="list">'+[...p.draws].reverse().map(x=>'<li><span>'+x.seq+' · '+escape(x.college)+'</span><strong>签位 '+x.slot+'</strong></li>').join("")+'</ul>':empty("尚无抽签记录")))+
-    panel('<h2>尚未抽签</h2>'+(remaining.length?(next?'<p class="muted">下一位 · '+escape(teamName(next))+'</p>':"")+
-      '<ul class="list">'+remaining.map(t=>'<li>'+escape(teamName(t))+'</li>').join("")+'</ul>':empty("所有学院均已完成")))+ '</div>';
+  const draw=state.college_draw, last=[...draw.draws].sort((a,b)=>b.seq-a.seq)[0];
+  const key=last?[draw.revision,last.seq,last.position].join("-"):"";
+  const animate=key && drawKeys.college!==key;
+  drawKeys.college=key;
+  const remaining=draw.order.filter(name=>!draw.draws.some(d=>d.college===name));
+  return header("公开抽签大屏",'<div class="actions"><span class="online" id="connection">实时连接</span><a class="button subtle" href="#live'+
+      (location.hash.endsWith("/screen")?'">标准视图':'/M/screen">投屏视图')+'</a></div>')+
+    '<div class="live"><p class="eyebrow">'+(draw.preview?"预演 · ":"")+'统一学院抽签 · '+states[draw.state]+'</p><div class="live-card '+(animate?"reveal":"")+'">'+
+    '<div class="ball">'+(last?String(last.position).padStart(2,"0"):"·")+'</div><div><h2>'+(last?escape(last.college):"等待抽签")+'</h2>'+
+    '<p class="muted">'+(last?"第 "+last.seq+" 次抽签 · "+timeLabel(last.drawn_at):"每个学院抽一次，三个项目沿用同一份顺序")+'</p></div></div></div>'+
+    (draw.state==="locked"?panel('<div class="actions"><a class="button" href="#matches">查看三个项目对阵</a><a class="button subtle" href="#slots/M">查看项目签位</a></div>'):"")+
+    '<div class="split">'+panel('<h2>学院顺序 <span class="tag">'+draw.draws.length+' / '+draw.order.length+'</span></h2><div class="meter"><span style="width:'+
+      100*draw.draws.length/draw.order.length+'%"></span></div>'+
+      (draw.draws.length?'<ul class="list">'+draw.draws.map(d=>'<li><span>'+escape(d.college)+'</span><strong>顺序 '+d.position+'</strong></li>').join("")+'</ul>':empty("尚无抽签记录")))+
+    panel('<h2>尚未抽签</h2>'+(remaining.length?(draw.ordered?'<p class="muted">下一位 · '+escape(remaining[0])+'</p>':"")+
+      '<ul class="list">'+remaining.map(name=>'<li>'+escape(name)+'</li>').join("")+'</ul>':empty("所有学院均已完成")))+ '</div>';
 }
 
 function join() {
@@ -106,19 +108,23 @@ function join() {
   if (!rep) return header("学院负责人抽签入口")+panel('<form id="represent" class="narrow">'+
     '<label>学院名称<select name="college" required>'+options({"":"请选择学院",...colleges},"")+'</select></label>'+
     field("联系人姓名","name","","text","required maxlength=50 autocomplete=name")+'<div><button>进入抽签</button></div></form>');
+  const draw=state.college_draw, record=draw.draws.find(d=>d.college===rep.college);
+  const available=!record && !draw.legacy && draw.state==="open" && (!draw.ordered || draw.order[draw.draws.length]===rep.college);
   const entries=Object.values(state.teams).filter(t=>t.college===rep.college);
+  const animate=record && revealed.has("college");
+  revealed.delete("college");
   return header(rep.college,button("重新登记","change-rep"))+
-    '<p class="muted">联系人 '+escape(rep.name)+'</p><div class="grid">'+entries.map(team=>{
-      const p=state.projects[team.project], d=p.draws.find(x=>x.team===team.id);
-      const available=!d && p.state==="open" && (!p.ordered || p.order[p.draws.length]===team.id);
-      const animate=d && revealed.has(team.project);
-      revealed.delete(team.project);
-      return panel('<div class="bar"><h2>'+projects[team.project]+'</h2>'+chip(p.state)+'</div>'+
-        (d?'<div class="live-card '+(animate?"reveal":"")+'"><div class="ball">'+String(d.slot).padStart(2,"0")+'</div>'+
-          '<div><strong>已抽签</strong><p class="small muted">第 '+d.seq+' 位 · '+timeLabel(d.drawn_at)+'</p></div></div>'+
-          '<p><a class="button subtle" href="#matches/'+team.project+'">查看对阵</a></p>':
-          '<p>'+ (available?"现在可以抽签":p.state==="open"?"等待轮到本学院":"等待主持人开放抽签")+'</p>'+
-          '<button type="button" data-action="draw" data-value="'+team.project+'" '+(available?"":"disabled")+'>开始抽签</button>'));
+    '<p class="muted">联系人 '+escape(rep.name)+'</p>'+panel('<div class="bar"><h2>学院统一抽签</h2>'+chip(draw.state)+'</div>'+
+      (record?'<div class="live-card '+(animate?"reveal":"")+'"><div class="ball">'+String(record.position).padStart(2,"0")+'</div>'+
+        '<div><strong>学院顺序</strong><p class="small muted">'+timeLabel(record.drawn_at)+'</p></div></div>':
+        '<p>'+(available?"一次抽取本学院顺序":draw.state==="open"?"等待轮到本学院":"等待主持人开放抽签")+'</p>'+
+        '<button type="button" data-action="draw" '+(available?"":"disabled")+'>开始抽签</button>'))+
+    '<div class="grid">'+Object.entries(projects).map(([p,title])=>{
+      const team=entries.find(t=>t.project===p);
+      const result=team && state.projects[p].draws.find(d=>d.team===team.id);
+      return panel('<h2>'+title+'</h2>'+(!team?empty("本学院未报名，自动跳过"):
+        result?'<p>项目签位 '+result.slot+'</p><a class="button subtle" href="#matches/'+p+'">查看对阵</a>':
+        empty("沿用学院顺序，抽齐后生成签位")));
     }).join("")+'</div>';
 }
 
@@ -180,20 +186,23 @@ function loginPage() {
 }
 
 function host() {
-  const p=state.projects[project];
-  const registered=Object.fromEntries(admin.participants.map(x=>[x.team,x.name]));
-  const mode=p.ordered?"按指定顺序":"开放后自由抽签";
-  return header("主持控制",chip(p.state))+tabs()+
-    panel('<div class="bar"><h2>抽签流程</h2><span class="tag">第 '+p.revision+' 轮 · '+p.draws.length+' / '+p.order.length+'</span></div>'+
-    '<div class="actions">'+(p.state==="locked"?[]:p.state==="open"?["pause"]:["open"]).concat(p.state==="waiting"?[]:["redraw"])
-    .map(a=>button(auditNames[a],"host",a,a==="redraw"?"danger":"subtle")).join("")+
-    button("复制统一抽签入口","join-link")+'</div>'+
-    '<p class="small muted">'+mode+' · 抽齐后自动锁定并生成对阵</p>')+
-    panel('<h2>学院及联系人</h2><ol class="list" id="order">'+p.order.map(id=>'<li class="round-row" data-team="'+id+'"><span>'+
-      escape(teamName(id))+(registered[id]?' <small class="muted">· '+escape(registered[id])+'</small>':"")+'</span>'+
-      '<span class="actions">'+(p.state==="waiting"?button("↑","order-move","up")+button("↓","order-move","down"):"")+
-      (registered[id]?button("重置登记","reset-rep",id):"")+'</span></li>').join("")+'</ol>'+
-      (p.state==="waiting"?'<div class="actions">'+button("保存并按此顺序","order-save")+button("使用自由抽签","order-free")+'</div>':""));
+  const d=state.college_draw;
+  const registered=Object.fromEntries(admin.participants.map(x=>[teamName(x.team),x.name]));
+  const mode=d.ordered?"按指定顺序操作":"开放后可自由抽签";
+  const actions=d.legacy?[]:d.state==="waiting"?["open","preview"]:d.state==="paused"?["open"]:d.state==="open"?["pause"]:[];
+  const labels={open:"开放 / 继续",pause:"暂停",preview:"一键预演",reset:"恢复初始状态"};
+  return header("主持控制",chip(d.state))+
+    panel('<div class="bar"><h2>'+(d.preview?"预演结果":"统一学院抽签")+'</h2><span class="tag">第 '+d.revision+' 轮 · '+d.draws.length+' / '+d.order.length+'</span></div>'+
+    (d.legacy?'<p class="warnbox">此房间有旧版抽签数据，请先归档并恢复初始状态。</p>':"")+
+    '<div class="actions">'+actions.concat(d.state!=="waiting"||d.legacy?["reset"]:[])
+      .map(a=>button(labels[a],"host",a,a==="reset"?"danger":"subtle")).join("")+
+    button("复制统一抽签入口","join-link")+(d.state==="locked"?'<a class="button subtle" href="#matches">查看全部对阵</a>':"")+'</div>'+
+    '<p class="small muted">'+mode+' · 每个学院抽一次，全部抽齐后生成三个项目对阵</p>')+
+    panel('<h2>学院及联系人</h2><ol class="list" id="order">'+d.order.map(name=>'<li class="round-row" data-college="'+escape(name)+'"><span>'+
+      escape(name)+(registered[name]?' <small class="muted">· '+escape(registered[name])+'</small>':"")+'</span>'+
+      '<span class="actions">'+(d.state==="waiting"&&!d.legacy?button("↑","order-move","up")+button("↓","order-move","down"):"")+
+      (registered[name]?button("重置登记","reset-rep",name):"")+'</span></li>').join("")+'</ol>'+
+      (d.state==="waiting"&&!d.legacy?'<div class="actions">'+button("保存并按此顺序","order-save")+button("使用自由抽签","order-free")+'</div>':""));
 }
 
 function rosterPage() {
@@ -284,7 +293,8 @@ function render() {
   } else if (adminPages.has(route) && !me.admin) {
     main.innerHTML=header("需要管理员权限")+'<a class="button" href="#login">管理员登录</a>';
   } else {
-    main.innerHTML=pages[route]();
+    main.innerHTML=(state?.college_draw.preview && route!=="live"?
+      '<p class="warnbox">抽签预演 · 结果仅用于演练</p>':"")+pages[route]();
   }
   main.setAttribute("aria-busy","false");
   renderedVersion=state?.version;
@@ -308,6 +318,9 @@ async function refresh(force=false) {
     online=true;
     const passive=["home","live","slots","matches","calendar","standings","awards","refs","join","score","host"].includes(route);
     const editing=main.querySelector("details[open]") || main.contains(document.activeElement) && document.activeElement.matches("input,select,textarea");
+    if (route==="join" && me.rep && state?.college_draw.state==="waiting" && renderedVersion!==state?.version) {
+      me=await api("/api/session");
+    }
     if (force || passive && renderedVersion!==state?.version && !editing && !busy) {
       if (me.admin && room) admin=await api(root+"/admin");
       if (me.admin && route==="audit" && room) audit=await api(root+"/audit");
@@ -345,17 +358,17 @@ document.addEventListener("click", async e=>{
     if(action==="share") {await copy(location.origin+location.pathname);msg("已复制赛事链接");}
     else if(action==="logout") {await api("/api/logout",{});me=await api("/api/session");location.hash="home";await refresh(true);}
     else if(action==="draw") {
-      const p=value;
-      const result=await api(root+"/draw",{project:p,revision:state.projects[p].revision});
-      revealed.add(p); msg("抽签成功 · 签位 "+result.slot);
+      const result=await api(root+"/draw",{revision:state.college_draw.revision});
+      revealed.add("college"); msg("抽签成功 · 学院顺序 "+result.position);
       await refresh(true);
     } else if(action==="host"){
-      const data={project,action:value};
-      if(value==="redraw"){
-        data.reason=prompt("请输入重抽原因");
+      const data={action:value};
+      if(value==="preview"&&!confirm("一键生成本房间的预演对阵？可在导出后恢复初始状态。")) return;
+      if(value==="reset"){
+        data.reason=prompt("请输入恢复初始状态的原因");
         if(!data.reason?.trim()) return;
-        data.confirm=prompt("本轮签位将归档。请输入「确认重抽」");
-        if(data.confirm!=="确认重抽") return;
+        data.confirm=prompt("本轮签位、对阵和联系人登记将归档。请输入「恢复初始状态」");
+        if(data.confirm!=="恢复初始状态") return;
       }
       await mutate(root+"/admin/draw",data);
     } else if(action==="order-move"){
@@ -364,12 +377,12 @@ document.addEventListener("click", async e=>{
       if(value==="down"&&item.nextElementSibling) item.after(item.nextElementSibling);
     } else if(action==="order-save" || action==="order-free"){
       await mutate(root+"/admin/draw",{project,action:"order",ordered:action==="order-save",
-        order:[...document.querySelectorAll("#order li")].map(x=>x.dataset.team)});
+        order:[...document.querySelectorAll("#order li")].map(x=>x.dataset.college)});
     } else if(action==="join-link"){
       await copy(location.origin+location.pathname+"#join");msg("已复制统一抽签入口");
     } else if(action==="reset-rep"){
-      const reason=prompt("填写重置 "+teamName(value)+" 联系人登记的原因");
-      if(reason?.trim()) await mutate(root+"/admin/represent",{college:teamName(value),reason});
+      const reason=prompt("填写重置 "+value+" 联系人登记的原因");
+      if(reason?.trim()) await mutate(root+"/admin/represent",{college:value,reason});
     } else if(action==="change-rep"){
       delete me.rep;render();
     } else if(action==="ref-invite"){

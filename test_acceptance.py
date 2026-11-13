@@ -78,74 +78,87 @@ def verify(workbook, db_path, restored_path, output=None):
     colleges = {team["college"] for team in source["teams"]}
     with ThreadPoolExecutor(max_workers=11) as pool:
         registrations = dict(pool.map(register, sorted(colleges)))
-    reps = {team["id"]: registrations[team["college"]] for team in source["teams"]}
     assert len(admin.get(url + "/admin")["participants"]) == 31
     college = "高等教育研究中心"
     viewer.post(url + "/represent", {"college": college, "name": "另一联系人"}, 409)
-    registrations[college][0].post(url + "/draw", {"project": "X", "revision": 1}, 403)
     admin.post(url + "/admin/represent", {"college": college, "reason": "验收重置登记"})
-    registrations[college][0].post(url + "/draw", {"project": "M", "revision": 1}, 403)
+    registrations[college][0].post(url + "/draw", {"revision": 1}, 403)
     registrations[college][0].post(url + "/represent", registrations[college][1])
-    for p in t.PROJECTS:
-        current = viewer.get(url)["projects"][p]
-        order = current["order"][::-1]
-        if p == "M":
-            admin.post(url + "/admin/draw", {"project": p, "action": "order", "order": order})
-        else:
-            assert not current["ordered"]
-        admin.post(url + "/admin/draw", {"project": p, "action": "open"})
-        if p == "M":
-            admin.post(url + "/admin/draw", {"project": p, "action": "pause"})
-            reps[order[0]][0].post(url + "/draw", {"project": p, "revision": 1}, 409)
-            admin.post(url + "/admin/draw", {"project": p, "action": "open"})
-            reps[order[1]][0].post(url + "/draw", {"project": p, "revision": 1}, 409)
-            rejoined = Client(app)
-            rejoined.post(url + "/represent", reps[order[0]][1])
-            first = reps[order[0]][0]
-            barrier = Barrier(2)
-            def race(client):
-                barrier.wait()
-                return client.client.post(url + "/draw", json={"project": p, "revision": 1},
-                                          headers={"X-CSRF-Token": client.csrf}).status_code
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                results = list(pool.map(race, (first, rejoined)))
-            assert sorted(results) == [200, 409]
-            to_draw = order[1:]
-        else:
-            to_draw = order
-        for team in to_draw:
-            reps[team][0].post(url + "/draw", {"project": p, "revision": 1})
-        reconnected = Client(create_app(db_path, TEST_SECRET))
-        before = reconnected.get(url)["projects"][p]
-        assert len(before["draws"]) == roster.EXPECTED[p]
-        assert len({x["slot"] for x in before["draws"]}) == roster.EXPECTED[p]
-        assert [x["team"] for x in before["draws"]] == order
-        assert len({(n - 1)//2 for n in before["byes"]}) == 16 - roster.EXPECTED[p]
-        assert reconnected.get(url)["projects"][p] == before
-        reps[order[-1]][0].post(url + "/draw", {"project": p, "revision": 1}, 409)
-        assert before["state"] == "locked"
-    state = viewer.get(url)
-    assert sum(not x["verified"] for x in admin.get(url + "/admin")["teams"]) == 4
-    assert len(state["matches"]) == 37
+    order = sorted(colleges, reverse=True)
+    admin.post(url + "/admin/draw", {"action": "order", "order": order})
+    admin.post(url + "/admin/draw", {"action": "open"})
+    admin.post(url + "/admin/draw", {"action": "pause"})
+    first = registrations[order[0]][0]
+    first.post(url + "/draw", {"revision": 1}, 409)
+    admin.post(url + "/admin/draw", {"action": "open"})
+    registrations[order[1]][0].post(url + "/draw", {"revision": 1}, 409)
+    rejoined = Client(app)
+    rejoined.post(url + "/represent", registrations[order[0]][1])
+    barrier = Barrier(2)
+
+    def race(client):
+        barrier.wait()
+        return client.client.post(url + "/draw", json={"revision": 1},
+                                  headers={"X-CSRF-Token": client.csrf}).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(race, (first, rejoined))) == [200, 409]
+    for college in order[1:]:
+        registrations[college][0].post(url + "/draw", {"revision": 1})
+    first.post(url + "/draw", {"revision": 1}, 409)
+
     expected = {"M": {"pre": 3, "quarter": 4, "round": 6},
                 "W": {"pre": 3, "quarter": 4, "round": 6},
                 "X": {"pre": 1, "quarter": 4, "round": 6}}
-    for p in t.PROJECTS:
-        assert Counter(m["stage"] for m in state["matches"] if m["project"] == p) == expected[p]
-        assert all(m["next"] for m in state["matches"] if m["project"] == p and m["stage"] != "round")
-        assert len({frozenset((m["a_source"], m["b_source"])) for m in state["matches"]
-                    if m["project"] == p and m["stage"] == "round"}) == 6
-    admin.post(url + "/admin/draw", {"project": "X", "action": "redraw", "reason": "验收历史归档"}, 409)
-    admin.post(url + "/admin/draw", {"project": "X", "action": "redraw", "reason": "验收历史归档", "confirm": "确认重抽"})
-    admin.post(url + "/admin/draw", {"project": "X", "action": "open"})
-    p = "X"
-    for team in state["projects"]["X"]["order"]:
-        reps[team][0].post(url + "/draw", {"project": p, "revision": 1}, 409)
-        reps[team][0].post(url + "/draw", {"project": p, "revision": 2})
-    assert viewer.get(url)["projects"]["X"]["state"] == "locked"
-    with t.transaction(db_path) as db:
-        assert db.execute("SELECT count(*) FROM draws WHERE project='X'").fetchone()[0] == 18
-    print("PASS 11 学院并发登记、按序/自由抽签、抽签竞态、刷新与新连接恢复、暂停、抽齐自动锁定、重抽留痕及 3/3/1 附加赛", flush=True)
+
+    def check_draw(state, revision, preview):
+        d = state["college_draw"]
+        assert (d["state"], d["revision"], d["preview"]) == ("locked", revision, preview)
+        assert [x["position"] for x in d["draws"]] == list(range(1, 12))
+        by_position = [x["college"] for x in d["draws"]]
+        for p in t.PROJECTS:
+            x = state["projects"][p]
+            eligible = {team["college"] for team in state["teams"].values() if team["project"] == p}
+            projected = sorted(x["draws"], key=lambda d: d["slot"])
+            assert [d["college"] for d in projected] == [c for c in by_position if c in eligible]
+            assert len({(n - 1)//2 for n in x["byes"]}) == 16 - roster.EXPECTED[p]
+            assert Counter(m["stage"] for m in state["matches"] if m["project"] == p) == expected[p]
+            assert all(m["next"] for m in state["matches"] if m["project"] == p and m["stage"] != "round")
+            assert len({frozenset((m["a_source"], m["b_source"])) for m in state["matches"]
+                        if m["project"] == p and m["stage"] == "round"}) == 6
+        assert [d["slot"] for d in state["projects"]["M"]["draws"]] == [d["slot"] for d in state["projects"]["W"]["draws"]]
+        assert len(state["matches"]) == 37
+
+    original = viewer.get(url)
+    check_draw(original, 1, False)
+    assert sorted(original["college_draw"]["draws"], key=lambda d: d["seq"])[0]["college"] == order[0]
+    reconnected = Client(create_app(db_path, TEST_SECRET))
+    assert reconnected.get(url) == original
+    reset = {"action": "reset", "reason": "验收恢复初始状态", "confirm": "恢复初始状态"}
+    admin.post(url + "/admin/draw", dict(reset, confirm=""), 409)
+    admin.post(url + "/admin/draw", reset)
+    empty = viewer.get(url)
+    assert empty["college_draw"]["state"] == "waiting" and empty["college_draw"]["revision"] == 2
+    assert not empty["college_draw"]["draws"] and not empty["matches"]
+    assert not admin.get(url + "/admin")["participants"]
+    assert first.get("/api/session")["rep"] is None
+    admin.post(url + "/admin/draw", {"action": "preview"})
+    check_draw(viewer.get(url), 2, True)
+    admin.post(url + "/admin/draw", reset)
+    college = order[0]
+    first.post(url + "/represent", registrations[college][1])
+    admin.post(url + "/admin/draw", {"action": "open"})
+    first.post(url + "/draw", {"revision": 2}, 409)
+    # A second manual draw run in free order from fresh registrations.
+    for college in reversed(order):
+        client, registration = registrations[college]
+        client.post(url + "/represent", registration)
+        client.post(url + "/draw", {"revision": 3})
+    state = viewer.get(url)
+    check_draw(state, 3, False)
+    assert sum(not x["verified"] for x in admin.get(url + "/admin")["teams"]) == 4
+    assert any(x["action"] == "统一抽签重置归档" and x["detail"]["preview"] for x in admin.get(url + "/audit"))
+    print("PASS 一院一签、并发防重、三项目相同相对顺序、混双跳过未报名、预演及两次归档重置重开", flush=True)
 
     admin.post(url + "/admin/officials", {"names": ["测试裁判甲", "测试裁判乙", "测试裁判丙", "测试裁判丁"]})
     admin.post(url + "/admin/schedule", {"action": "build"})
@@ -260,7 +273,7 @@ def verify(workbook, db_path, restored_path, output=None):
     reboot = Client(create_app(restored_path, TEST_SECRET))
     assert reboot.get(url) == viewer.get(url)
     with t.transaction(restored_path) as db:
-        assert db.execute("SELECT count(*) FROM draws").fetchone()[0] == 40
+        assert db.execute("SELECT count(*) FROM draws").fetchone()[0] == 93
         assert db.execute("SELECT count(*) FROM rankings").fetchone()[0] == 12
     print("PASS 20 个 Excel/PDF 导出、数据库在线备份、异库恢复与全量状态对比", flush=True)
     return room

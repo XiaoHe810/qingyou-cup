@@ -30,6 +30,12 @@ CREATE TABLE IF NOT EXISTS draws (
   UNIQUE(room,project,revision,seq), FOREIGN KEY(room,team) REFERENCES teams(room,id),
   FOREIGN KEY(room,project) REFERENCES projects(room,code)
 );
+CREATE TABLE IF NOT EXISTS college_draws (
+  room TEXT NOT NULL REFERENCES rooms(id), revision INTEGER NOT NULL,
+  college TEXT NOT NULL, position INTEGER NOT NULL CHECK(position > 0),
+  seq INTEGER NOT NULL, drawn_at TEXT NOT NULL, actor TEXT NOT NULL,
+  PRIMARY KEY(room,revision,college), UNIQUE(room,revision,position), UNIQUE(room,revision,seq)
+);
 CREATE TABLE IF NOT EXISTS matches (
   room TEXT NOT NULL, code TEXT NOT NULL, project TEXT NOT NULL, stage TEXT NOT NULL,
   a_source TEXT NOT NULL, b_source TEXT NOT NULL, a TEXT, b TEXT, winner TEXT,

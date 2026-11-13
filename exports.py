@@ -44,6 +44,13 @@ def table_data(state, kind):
     names = {k: v["college"] for k, v in state["teams"].items()}
     matches = state["matches"]
     if kind == "draw":
+        shared = state["college_draw"]
+        if shared["draws"]:
+            project_slots = {p: {d["college"]: d["slot"] for d in project["draws"]}
+                             for p, project in state["projects"].items()}
+            lines = [[d["position"], d["college"], *[project_slots[p].get(d["college"], "") for p in PROJECTS],
+                      d["seq"], d["drawn_at"][:19].replace("T", " ")] for d in shared["draws"]]
+            return ["学院顺序", "学院", *PROJECTS.values(), "操作次序", "抽签时间"], lines
         lines = []
         for p, project in state["projects"].items():
             for d in project["draws"]:
@@ -223,7 +230,7 @@ def pdf(title, subtitle, columns, lines, wide, brackets=()):
     elif columns[0] == "编号":
         fractions = [.65, 1.3, 1.8, 1.8, .9, 2 if title == REPORTS["scores"] else 1, 1.5, 1.2]
     elif title == REPORTS["draw"]:
-        fractions = [1.3, .65, .65, .65, 2.2, 2.1]
+        fractions = [1, 2.3, 1, 1, 1, .9, 2.1] if len(columns) == 7 else [1.3, .65, .65, .65, 2.2, 2.1]
     elif title == REPORTS["standings"]:
         fractions = [1.4, 2.4, .7, .7, .7, .7, .7, .7]
     table = Table(rows, colWidths=[(doc.width - 10) * f / sum(fractions) for f in fractions], repeatRows=1)
@@ -251,6 +258,8 @@ def make_export(state, kind, filetype):
     cols, lines = table_data(state, kind)
     title = REPORTS[kind]
     subtitle = state["title"] + " · " + state["venue"]
+    if state["college_draw"]["preview"]:
+        subtitle += " · 预演"
     wide = kind in PROJECTS or kind in ("scores", "matchups")
     need(filetype in ("xlsx", "pdf"), "仅支持 Excel 和 PDF")
     if filetype == "xlsx":

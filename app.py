@@ -101,6 +101,10 @@ def create_app(db_path, secret, secure=False):
     def whoami():
         if "csrf" not in session:
             session["csrf"] = secrets.token_urlsafe(24)
+        rep = session.get("rep")
+        if rep and rep.get("college") and not t.one(g.db, """SELECT 1 FROM participants p JOIN teams t ON t.room=p.room AND t.id=p.team
+                WHERE p.room=? AND t.college=? AND p.name=?""", (rep["room"], rep["college"], rep["name"])):
+            session.pop("rep", None)
         return jsonify(csrf=session["csrf"], admin=session.get("admin"),
                        rep=session.get("rep"), referee=session.get("referee"))
 
@@ -214,14 +218,11 @@ def create_app(db_path, secret, secure=False):
         if rep.get("room") != room or not rep.get("college"):
             abort(403)
         data = payload()
-        project = data["project"]
-        participant = t.one(g.db, """SELECT t.id,p.name FROM participants p JOIN teams t
-                            ON t.room=p.room AND t.id=p.team WHERE p.room=? AND t.college=? AND t.project=?""",
-                            (room, rep["college"], project))
-        if not participant or participant["name"] != rep["name"]:
+        participant = t.one(g.db, """SELECT 1 FROM participants p JOIN teams t ON t.room=p.room AND t.id=p.team
+                            WHERE p.room=? AND t.college=? AND p.name=?""", (room, rep["college"], rep["name"]))
+        if not participant:
             abort(403)
-        t.need(data.get("revision") == t.project_state(g.db, room, project)["revision"], "抽签轮次已更新，请刷新")
-        return jsonify(slot=t.take_slot(g.db, room, project, participant["id"], rep["name"]))
+        return jsonify(position=t.take_college_position(g.db, room, rep["college"], rep["name"], data.get("revision")))
 
     @app.post("/api/r/<room>/admin/represent")
     @api(write=True, admin=True)
@@ -240,11 +241,7 @@ def create_app(db_path, secret, secure=False):
     @api(write=True, admin=True)
     def host_draw(room):
         data = payload()
-        if data["action"] == "order":
-            t.set_order(g.db, room, data["project"], data["order"], g.actor, data.get("ordered") is not False)
-        else:
-            t.draw_action(g.db, room, data["project"], data["action"], g.actor,
-                          data.get("reason", ""), data.get("confirm", ""))
+        t.host_action(g.db, room, data["action"], g.actor, data)
         return jsonify(ok=True)
 
     @app.post("/api/r/<room>/admin/roster")
@@ -459,18 +456,18 @@ def public_state(db, room):
         if m["schedule"]:
             m["schedule"]["official"] = officials.get(m["schedule"]["referee"])
     projects = {}
-    ordered = r["settings"].get("ordered_projects", [])
     for p in t.PROJECTS:
         item = t.project_state(db, room, p)
         draws = t.get_draws(db, item)
         standings, complete = t.standings(db, room, p, r["settings"])
         projects[p] = {"state": item["state"], "revision": item["revision"], "draws": draws, "byes": item["byes"],
-                       "order": item["draw_order"], "ordered": p in ordered, "standings": standings, "complete": complete,
+                       "order": item["draw_order"], "standings": standings, "complete": complete,
                        "ranking": t.rows(db, "SELECT team,rank FROM rankings WHERE room=? AND project=? ORDER BY rank", (room, p))}
     last = t.one(db, "SELECT max(id) AS n FROM audit WHERE room=?", (room,))["n"]
     dates = sorted({x["start"][:10] for x in assignments.values()}) or ["2026-11-14", "2026-11-15"]
     return {"room": room, "title": r["title"], "dates": dates, "venue": r["settings"]["public_venue"] or t.DEFAULTS["venue"],
-            "version": last, "teams": teams, "projects": projects, "matches": matches}
+            "version": last, "teams": teams, "projects": projects, "matches": matches,
+            "college_draw": t.unified_draw(db, room)}
 
 
 def make_backup(source, target):

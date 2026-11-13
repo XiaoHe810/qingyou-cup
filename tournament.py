@@ -136,82 +136,129 @@ def get_draws(db, p):
                 (p["room"], p["code"], p["revision"]))
 
 
-def set_order(db, room, project, order, actor, ordered=True):
-    p = project_state(db, room, project)
-    need(p["state"] == "waiting" and not get_draws(db, p), "仅可在项目开放抽签前设置顺序")
-    need(isinstance(order, list) and all(isinstance(x, str) for x in order)
-         and sorted(order) == sorted(p["draw_order"]), "顺序必须包含该项目全部学院，且各出现一次")
-    db.execute("UPDATE projects SET draw_order=? WHERE room=? AND code=?", (dumps(order), room, project))
+def college_order(db, room):
+    return [r["college"] for r in rows(db, "SELECT college FROM teams WHERE room=? GROUP BY college ORDER BY min(id)", (room,))]
+
+
+def college_draws(db, room, revision):
+    return rows(db, """SELECT college,position,seq,drawn_at FROM college_draws
+                       WHERE room=? AND revision=? ORDER BY position""", (room, revision))
+
+
+def unified_draw(db, room):
+    projects = [project_state(db, room, p) for p in PROJECTS]
+    lead = projects[0]
+    history = college_draws(db, room, lead["revision"])
+    # Previously generated project draws remain readable and can be archived via reset.
+    legacy = any(p["revision"] != lead["revision"] or p["state"] != lead["state"] or
+                 (not history and get_draws(db, p)) for p in projects)
     settings = get_room(db, room)["settings"]
-    ordered_projects = set(settings.get("ordered_projects", []))
-    if ordered:
-        ordered_projects.add(project)
-    else:
-        ordered_projects.discard(project)
-    settings["ordered_projects"] = sorted(ordered_projects)
+    return {"state": lead["state"], "revision": lead["revision"], "legacy": legacy,
+            "draws": history, "order": settings.get("college_order") or college_order(db, room),
+            "ordered": bool(settings.get("college_order")), "preview": bool(settings.get("college_preview"))}
+
+
+def reset_draw(db, room, actor, reason, confirm):
+    need(confirm == "恢复初始状态" and reason.strip(), "请输入原因，并输入「恢复初始状态」")
+    settings = get_room(db, room)["settings"]
+    need(settings.get("college_preview") or
+         not one(db, "SELECT 1 FROM matches WHERE room=? AND (status!='pending' OR pending_score IS NOT NULL)", (room,)),
+         "正式比赛已有开赛或成绩记录，无法重置抽签")
+    projects = [project_state(db, room, p) for p in PROJECTS]
+    log(db, room, actor, "统一抽签重置归档",
+        {"reason": reason.strip(), "preview": bool(settings.get("college_preview")),
+         "projects": [{**p, "draws": get_draws(db, p)} for p in projects],
+         "college_draws": college_draws(db, room, projects[0]["revision"]),
+         "matches": rows(db, "SELECT * FROM matches WHERE room=?", (room,)),
+         "schedule": rows(db, "SELECT * FROM schedule WHERE room=?", (room,)),
+         "participants": rows(db, "SELECT * FROM participants WHERE room=?", (room,))})
+    for table in ("matches", "participants", "rankings", "tie_decisions"):
+        db.execute(f"DELETE FROM {table} WHERE room=?", (room,))
+    revision = max(p["revision"] for p in projects) + 1
+    for project in PROJECTS:
+        order = [r["id"] for r in rows(db, "SELECT id FROM teams WHERE room=? AND project=? ORDER BY id", (room, project))]
+        db.execute("UPDATE projects SET state='waiting',revision=?,byes='[]',draw_order=? WHERE room=? AND code=?",
+                   (revision, dumps(order), room, project))
+    for key in ("college_order", "college_preview", "ordered_projects"):
+        settings.pop(key, None)
+    settings["public_venue"] = None
     db.execute("UPDATE rooms SET settings=? WHERE id=?", (dumps(settings), room))
-    log(db, room, actor, "修改抽签顺序", {"project": project, "before": p["draw_order"], "after": order,
-                                        "ordered": ordered})
 
 
-def draw_action(db, room, project, action, actor, reason="", confirm=""):
-    p = project_state(db, room, project)
-    current = get_draws(db, p)
-    state, byes, revision = p["state"], p["byes"], p["revision"]
-    if action == "open":
-        need(state in ("waiting", "paused") and len(current) < len(p["draw_order"]), "当前无法开放抽签")
-        count = one(db, "SELECT count(*) AS n FROM teams WHERE room=? AND project=?",
-                    (room, project))["n"]
-        need(count == EXPECTED[project], "该项目报名队数与赛制不符")
-        if not byes:
-            byes = sorted(2 * pair + RNG.choice((1, 2)) for pair in RNG.sample(range(8), 16 - count))
-        state = "open"
+def host_action(db, room, action, actor, data):
+    if action == "reset":
+        reset_draw(db, room, actor, data.get("reason", ""), data.get("confirm", ""))
+        return
+    state = unified_draw(db, room)
+    need(not state["legacy"], "旧版签位请先归档并恢复初始状态")
+    status = state["state"]
+    settings = get_room(db, room)["settings"]
+    if action == "order":
+        order = data["order"]
+        need(status == "waiting", "仅可在开放前设置学院操作顺序")
+        need(isinstance(order, list) and all(isinstance(x, str) for x in order) and
+             sorted(order) == sorted(state["order"]), "顺序须包含全部学院，各出现一次")
+        settings["college_order"] = order if data.get("ordered", True) else []
+        db.execute("UPDATE rooms SET settings=? WHERE id=?", (dumps(settings), room))
+    elif action in ("open", "preview"):
+        need(status in (("waiting",) if action == "preview" else ("waiting", "paused")), "当前无法开放抽签")
+        counts = {r["project"]: r["n"] for r in rows(db, "SELECT project,count(*) AS n FROM teams WHERE room=? GROUP BY project", (room,))}
+        need(counts == EXPECTED, "报名队数与赛制不符")
+        db.execute("UPDATE projects SET state='open' WHERE room=?", (room,))
+        if action == "preview":
+            settings["college_preview"] = True
+            db.execute("UPDATE rooms SET settings=? WHERE id=?", (dumps(settings), room))
+            for college in state["order"]:
+                take_college_position(db, room, college, actor, state["revision"])
     elif action == "pause":
-        need(state == "open", "当前无法暂停")
-        state = "paused"
-    elif action == "lock":
-        need(state in ("open", "paused") and len(current) == len(p["draw_order"]), "请等待全部队伍完成抽签")
-        create_matches(db, room, project, current, byes)
-        state = "locked"
-    elif action == "redraw":
-        need(state != "waiting", "该项目尚未开启")
-        need(confirm == "确认重抽" and reason.strip(), "请输入重抽原因，并输入「确认重抽」")
-        need(not one(db, """SELECT 1 FROM matches WHERE room=? AND project=?
-                            AND (status!='pending' OR pending_score IS NOT NULL)""", (room, project)),
-             "该项目已有开赛或成绩记录，不能重抽")
-        old = rows(db, "SELECT * FROM matches WHERE room=? AND project=?", (room, project))
-        assignments = rows(db, """SELECT s.* FROM schedule s JOIN matches m ON m.room=s.room AND m.code=s.code
-                               WHERE m.room=? AND m.project=?""", (room, project))
-        log(db, room, actor, "重抽归档", {"project": project, "revision": revision, "reason": reason.strip(),
-                                        "byes": byes, "draws": current, "matches": old, "schedule": assignments})
-        db.execute("DELETE FROM matches WHERE room=? AND project=?", (room, project))
-        revision, state, byes = revision + 1, "waiting", []
+        need(status == "open", "当前无法暂停")
+        db.execute("UPDATE projects SET state='paused' WHERE room=?", (room,))
     else:
         raise RuleError("未知抽签操作")
-    db.execute("UPDATE projects SET state=?,byes=?,revision=? WHERE room=? AND code=?",
-               (state, dumps(byes), revision, room, project))
-    log(db, room, actor, "抽签状态", {"project": project, "action": action, "state": state,
-                                   "revision": revision, "byes": byes})
+    log(db, room, actor, "统一抽签操作", {"action": action, "revision": state["revision"],
+                                       "order": settings.get("college_order", [])})
 
 
-def take_slot(db, room, project, team, actor):
-    p = project_state(db, room, project)
-    current = get_draws(db, p)
-    need(team in p["draw_order"], "该项目报名队伍校验失败")
-    need(not any(d["team"] == team for d in current), "该学院本轮已完成抽签")
-    need(p["state"] == "open", "主持人尚未开放抽签或已暂停")
-    if project in get_room(db, room)["settings"].get("ordered_projects", []):
-        need(p["draw_order"][len(current)] == team, "请等待本学院抽签顺序")
-    occupied = set(p["byes"]) | {d["slot"] for d in current}
-    slot = RNG.choice(sorted(set(range(1, 17)) - occupied))
+def take_college_position(db, room, college, actor, revision):
+    state = unified_draw(db, room)
+    need(revision == state["revision"], "抽签轮次已更新，请刷新")
+    need(not state["legacy"], "旧版签位请先归档并恢复初始状态")
+    need(college in state["order"], "该学院没有报名")
+    previous = state["draws"]
+    need(not any(d["college"] == college for d in previous), "该学院本轮已完成抽签")
+    need(state["state"] == "open", "主持人尚未开放抽签或已暂停")
+    if state["ordered"]:
+        need(state["order"][len(previous)] == college, "请等待本学院抽签顺序")
+    position = RNG.choice(sorted(set(range(1, len(state["order"]) + 1)) - {d["position"] for d in previous}))
     at = now()
-    db.execute("INSERT INTO draws VALUES(?,?,?,?,?,?,?,?)",
-               (room, project, p["revision"], team, slot, len(current) + 1, at, actor))
-    log(db, room, actor, "抽签", {"project": project, "revision": p["revision"],
-                               "team": team, "slot": slot, "seq": len(current) + 1})
-    if len(current) + 1 == len(p["draw_order"]):
-        draw_action(db, room, project, "lock", "系统")
-    return slot
+    db.execute("INSERT INTO college_draws VALUES(?,?,?,?,?,?,?)",
+               (room, revision, college, position, len(previous) + 1, at, actor))
+    log(db, room, actor, "学院抽签", {"college": college, "position": position,
+                                  "revision": revision, "seq": len(previous) + 1})
+    if len(previous) + 1 == len(state["order"]):
+        finalize_college_draw(db, room, revision)
+    return position
+
+
+def finalize_college_draw(db, room, revision):
+    drawn = rows(db, "SELECT * FROM college_draws WHERE room=? AND revision=? ORDER BY position", (room, revision))
+    byes_by_count = {}
+    for project, count in EXPECTED.items():
+        teams = {r["college"]: r["id"] for r in rows(db, "SELECT id,college FROM teams WHERE room=? AND project=?", (room, project))}
+        eligible = [d for d in drawn if d["college"] in teams]
+        need(len(eligible) == count, "项目报名不完整，无法生成签位")
+        if count not in byes_by_count:
+            byes_by_count[count] = sorted(2 * pair + RNG.choice((1, 2)) for pair in RNG.sample(range(8), 16 - count))
+        byes = byes_by_count[count]
+        slots = sorted(set(range(1, 17)) - set(byes))
+        result = [{"slot": slot, "team": teams[d["college"]]} for slot, d in zip(slots, eligible)]
+        # Use a compact per-project sequence preserving the relative order of the shared draw.
+        for seq, (d, item) in enumerate(zip(eligible, result), 1):
+            db.execute("INSERT INTO draws VALUES(?,?,?,?,?,?,?,?)",
+                       (room, project, revision, item["team"], item["slot"], seq, d["drawn_at"], d["actor"]))
+        create_matches(db, room, project, result, byes)
+        db.execute("UPDATE projects SET state='locked',byes=? WHERE room=? AND code=?", (dumps(byes), room, project))
+    log(db, room, "系统", "统一抽签锁定并生成三个项目对阵", {"revision": revision})
 
 
 def create_matches(db, room, project, draws, byes):
